@@ -212,8 +212,8 @@
   #winner-overlay {
     display: none; position: fixed; inset: 0;
     background: rgba(0,0,0,0.9); z-index: 150;
-    flex-direction: column; align-items: center; justify-content: center;
-    overflow-y: auto; padding: 20px;
+    flex-direction: column; align-items: center; justify-content: flex-start;
+    overflow-y: auto; padding: 20px 20px 40px;
   }
   #winner-overlay.visible { display: flex; }
   #winner-crown-big {
@@ -230,7 +230,8 @@
   }
   #winner-subtitle { color: #888; font-size: 0.85rem; margin-bottom: 14px; }
   #winner-shape-container {
-    width: 350px; height: 350px; border-radius: 16px; overflow: hidden;
+    width: 350px; height: 350px; min-height: 350px; flex-shrink: 0;
+    border-radius: 16px; overflow: hidden;
     border: 2px solid #ffd700; box-shadow: 0 0 40px rgba(255,215,0,0.2);
   }
   #winner-elo { font-size: 1.4rem; font-weight: 700; color: #ffd700; margin-top: 10px; }
@@ -259,6 +260,59 @@
   }
   .winner-btn:hover { filter: brightness(1.2); }
   .winner-btn.gold { background: linear-gradient(135deg, #ffd700, #daa520); color: #1a1a2e; }
+
+  /* Personality card */
+  #personality-card {
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  #personality-type {
+    font-size: 1.6rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, #ff6b6b, #ffd700, #4a9eff, #4aff6e);
+    background-size: 300% 300%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: gradientShift 3s ease infinite;
+  }
+  @keyframes gradientShift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+  #personality-tagline {
+    font-size: 0.8rem;
+    color: #888;
+    font-style: italic;
+    margin-top: 2px;
+  }
+  #personality-badges {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border: 1px solid;
+    animation: badgePop 0.5s ease backwards;
+  }
+  .badge:nth-child(1) { animation-delay: 0.3s; }
+  .badge:nth-child(2) { animation-delay: 0.5s; }
+  .badge:nth-child(3) { animation-delay: 0.7s; }
+  .badge:nth-child(4) { animation-delay: 0.9s; }
+  @keyframes badgePop {
+    0% { transform: scale(0); opacity: 0; }
+    60% { transform: scale(1.2); }
+    100% { transform: scale(1); opacity: 1; }
+  }
 
   /* Scrollbar */
   ::-webkit-scrollbar { width: 4px; }
@@ -334,15 +388,32 @@
   <div id="winner-crown-big">&#x1F451;</div>
   <div id="winner-title">CHAMPION FOUND</div>
   <div id="winner-subtitle">Your optimal shape after <span id="winner-rounds">40</span> comparisons</div>
+
+  <!-- Personality card -->
+  <div id="personality-card">
+    <div id="personality-type"></div>
+    <div id="personality-tagline"></div>
+    <div id="personality-badges"></div>
+  </div>
+
   <div id="winner-shape-container"></div>
+
+  <!-- Name your champion -->
+  <div id="name-champion" style="margin-top:10px;display:flex;align-items:center;gap:8px;justify-content:center;">
+    <input id="champion-name-input" type="text" placeholder="Name your champion..." maxlength="30"
+      style="background:#1a1a2e;border:1px solid #ffd700;color:#ffd700;padding:6px 14px;border-radius:8px;
+      font-size:0.9rem;font-weight:600;text-align:center;width:250px;outline:none;" />
+  </div>
+
   <div id="winner-elo">Elo: --</div>
-  <div style="margin-top:12px;text-align:center;">
+  <div style="margin-top:10px;text-align:center;">
     <div style="font-size:0.65rem;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">What You Prefer (Learned Weights)</div>
     <div id="preference-insights" style="width:360px;max-width:90vw;"></div>
   </div>
   <div id="evolution-timeline"></div>
   <div id="winner-buttons">
     <button class="winner-btn gold" id="btn-download-stl">&#x1F4BE; Download STL</button>
+    <button class="winner-btn" id="btn-share-card">&#x1F4F8; Share Card</button>
     <button class="winner-btn" onclick="restartOptimizer()">&#x1F504; New Run</button>
   </div>
 </div>
@@ -1038,6 +1109,129 @@ function buildEvolutionTimeline(snapshots) {
 }
 
 // ============================================================
+// PERSONALITY ENGINE + ACHIEVEMENTS
+// ============================================================
+function generatePersonality(params, weights) {
+  const w = weights;
+  const p = params;
+
+  // Determine dominant traits from learned weights
+  const dominated = PARAM_KEYS.map((key, i) => ({ key, w: w[i] }));
+  dominated.sort((a, b) => Math.abs(b.w) - Math.abs(a.w));
+  const top3 = dominated.slice(0, 3);
+
+  // Personality types based on what the model learned matters most
+  const typeRules = [
+    { test: () => top3.some(t => t.key === 'curvature' && t.w > 0.3), name: 'The Elegant Curve', tagline: 'You appreciate artful bending and graceful arcs.' },
+    { test: () => top3.some(t => t.key === 'shaftLength' && t.w > 0.3), name: 'The Long Game', tagline: 'Size matters -- at least in the longitudinal dimension.' },
+    { test: () => top3.some(t => t.key === 'shaftRadius' && t.w > 0.3), name: 'The Girthy Maximalist', tagline: 'You believe in substance over length.' },
+    { test: () => top3.some(t => t.key === 'headScale' && t.w > 0.3), name: 'The Crown Jewel', tagline: 'A magnificent head is worth a thousand shafts.' },
+    { test: () => top3.some(t => t.key === 'ridgeCount' && Math.abs(t.w) > 0.2), name: 'The Texture Enthusiast', tagline: 'Smooth is boring. Ridges tell a story.' },
+    { test: () => top3.some(t => t.key === 'twist' && t.w > 0.2), name: 'The Spiral Master', tagline: 'Why go straight when you can go helical?' },
+    { test: () => top3.some(t => t.key === 'tipPointiness' && t.w > 0.2), name: 'The Sharp Thinker', tagline: 'Pointed and purposeful. No wasted geometry.' },
+    { test: () => top3.some(t => t.key === 'smoothness' && t.w > 0.2), name: 'The Smooth Operator', tagline: 'Seamless transitions are the mark of sophistication.' },
+    { test: () => top3.some(t => t.key === 'baseFlare' && t.w > 0.2), name: 'The Foundation Builder', tagline: 'A strong base supports greatness.' },
+    { test: () => top3.some(t => t.key === 'veinCount' && t.w > 0.15), name: 'The Realist', tagline: 'Veins add character. You appreciate authenticity.' },
+    { test: () => dominated.every(d => Math.abs(d.w) < 0.15), name: 'The Balanced Aesthete', tagline: 'Harmony above all. No single trait dominates.' },
+  ];
+
+  let personality = { name: 'The Visionary', tagline: 'Your taste transcends simple categorization.' };
+  for (const rule of typeRules) {
+    if (rule.test()) { personality = rule; break; }
+  }
+
+  // Achievement badges
+  const badges = [];
+  const norm = (key) => { const [min, max] = PARAM_RANGES[key]; return (p[key] - min) / (max - min); };
+
+  if (norm('shaftLength') > 0.75) badges.push({ icon: '&#x1F4CF;', text: 'Size Maximizer', color: '#4a9eff' });
+  if (norm('shaftLength') < 0.25) badges.push({ icon: '&#x1F48E;', text: 'Compact & Precious', color: '#ff69b4' });
+  if (norm('shaftRadius') > 0.7) badges.push({ icon: '&#x1F4AA;', text: 'Girth Champion', color: '#ff6b6b' });
+  if (norm('curvature') > 0.6) badges.push({ icon: '&#x1F308;', text: 'Curvature Connoisseur', color: '#ffd700' });
+  if (norm('curvature') < 0.1) badges.push({ icon: '&#x1F4D0;', text: 'Straight Arrow', color: '#4aff6e' });
+  if (norm('twist') > 0.5) badges.push({ icon: '&#x1F300;', text: 'Twist Enjoyer', color: '#a855f7' });
+  if (p.ridgeCount >= 5) badges.push({ icon: '&#x1F30A;', text: 'Ripple Master', color: '#00bcd4' });
+  if (p.ridgeCount === 0 && p.veinCount === 0) badges.push({ icon: '&#x2728;', text: 'Smooth Perfectionist', color: '#e0e0e0' });
+  if (norm('headScale') > 0.7) badges.push({ icon: '&#x1F344;', text: 'Head Case', color: '#ff9800' });
+  if (norm('coronaSize') > 0.6) badges.push({ icon: '&#x1F451;', text: 'Corona King', color: '#ffd700' });
+  if (norm('tipPointiness') > 0.6) badges.push({ icon: '&#x1F525;', text: 'Sharp Shooter', color: '#ff5722' });
+  if (norm('baseFlare') > 0.7) badges.push({ icon: '&#x1F3DB;', text: 'Strong Foundation', color: '#795548' });
+  if (norm('asymmetry') > 0.5) badges.push({ icon: '&#x1F3A8;', text: 'Beautifully Imperfect', color: '#e91e63' });
+  if (p.veinCount >= 3) badges.push({ icon: '&#x1FAC0;', text: 'Anatomically Correct', color: '#f44336' });
+
+  // Limit to 4 most interesting
+  return { personality, badges: badges.slice(0, 4) };
+}
+
+// Share card: capture winner screen as image
+function shareCard() {
+  const overlay = document.getElementById('winner-overlay');
+  // Use canvas screenshot of the winner 3D shape
+  if (!winnerScene) return;
+  winnerScene.renderer.render(winnerScene.scene, winnerScene.camera);
+  const dataUrl = winnerScene.renderer.domElement.toDataURL('image/png');
+
+  // Build a shareable canvas
+  const c = document.createElement('canvas');
+  c.width = 600; c.height = 400;
+  const ctx = c.getContext('2d');
+
+  // Background
+  const bg = ctx.createLinearGradient(0, 0, 600, 400);
+  bg.addColorStop(0, '#0a0a1a'); bg.addColorStop(1, '#1a1a3e');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, 600, 400);
+
+  // Border
+  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 3;
+  ctx.strokeRect(10, 10, 580, 380);
+
+  // Title
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 28px Segoe UI, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('CHAMPION FOUND', 300, 50);
+
+  // Personality type
+  const pType = document.getElementById('personality-type').textContent;
+  ctx.fillStyle = '#a0c4ff'; ctx.font = 'bold 20px Segoe UI, sans-serif';
+  ctx.fillText(pType, 300, 80);
+
+  // Champion name
+  const nameInput = document.getElementById('champion-name-input');
+  if (nameInput.value) {
+    ctx.fillStyle = '#ffd700'; ctx.font = 'italic 16px Segoe UI, sans-serif';
+    ctx.fillText(`"${nameInput.value}"`, 300, 105);
+  }
+
+  // Elo
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold 16px Segoe UI, sans-serif';
+  ctx.fillText(document.getElementById('winner-elo').textContent, 300, 370);
+
+  // 3D shape image
+  const img = new Image();
+  img.onload = () => {
+    ctx.drawImage(img, 175, 115, 250, 250);
+
+    // Badges text
+    const badges = document.querySelectorAll('.badge');
+    ctx.font = '12px Segoe UI, sans-serif'; ctx.fillStyle = '#888';
+    badges.forEach((b, i) => {
+      ctx.fillText(b.textContent, 300, 340 - (badges.length - 1 - i) * 16);
+    });
+
+    // Watermark
+    ctx.fillStyle = '#333'; ctx.font = '10px Segoe UI, sans-serif';
+    ctx.fillText('khrulkovv.github.io', 300, 390);
+
+    // Download
+    const a = document.createElement('a');
+    a.download = 'my_champion.png';
+    a.href = c.toDataURL('image/png');
+    a.click();
+  };
+  img.src = dataUrl;
+}
+
+// ============================================================
 // MAIN APP
 // ============================================================
 let optimizer = new HybridOptimizer(14);
@@ -1143,6 +1337,20 @@ function showWinner() {
     </div>`;
   }
   insightEl.innerHTML = insightHtml;
+
+  // Personality type + achievements
+  const { personality, badges } = generatePersonality(best.params, optimizer.prefModel.weights);
+  document.getElementById('personality-type').textContent = personality.name;
+  document.getElementById('personality-tagline').textContent = personality.tagline;
+
+  let badgeHtml = '';
+  for (const b of badges) {
+    badgeHtml += `<span class="badge" style="border-color:${b.color};color:${b.color};background:${b.color}15;">${b.icon} ${b.text}</span>`;
+  }
+  document.getElementById('personality-badges').innerHTML = badgeHtml;
+
+  // Share card button
+  document.getElementById('btn-share-card').onclick = shareCard;
 }
 
 function handleChoice(winnerSide) {
