@@ -336,6 +336,10 @@
   <div id="winner-subtitle">Your optimal shape after <span id="winner-rounds">40</span> comparisons</div>
   <div id="winner-shape-container"></div>
   <div id="winner-elo">Elo: --</div>
+  <div style="margin-top:12px;text-align:center;">
+    <div style="font-size:0.65rem;color:#666;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">What You Prefer (Learned Weights)</div>
+    <div id="preference-insights" style="width:360px;max-width:90vw;"></div>
+  </div>
   <div id="evolution-timeline"></div>
   <div id="winner-buttons">
     <button class="winner-btn gold" id="btn-download-stl">&#x1F4BE; Download STL</button>
@@ -459,7 +463,7 @@ function animateConfetti() {
 // ============================================================
 function generateQR() {
   try {
-    const url = 'https://khrulkovv.github.io/';
+    const url = window.location.href;
     const qr = qrcode(0, 'M');
     qr.addData(url);
     qr.make();
@@ -742,9 +746,101 @@ function downloadSTL(shapeGroup) {
 }
 
 // ============================================================
-// ELO OPTIMIZER
+// BRADLEY-TERRY PREFERENCE MODEL
+// Learns w such that P(A > B) = sigmoid(w . (normalize(A) - normalize(B)))
+// Then generates candidates via gradient ascent on utility(p) = w . normalize(p)
 // ============================================================
-class EloOptimizer {
+class PreferenceModel {
+  constructor() {
+    this.weights = new Array(NUM_PARAMS).fill(0);  // learned preference direction
+    this.comparisons = [];  // [{winner: normalized[], loser: normalized[]}]
+    this.learningRate = 0.5;
+  }
+
+  // Normalize params to [0, 1] range for stable learning
+  normalize(params) {
+    return PARAM_KEYS.map(key => {
+      const [min, max] = PARAM_RANGES[key];
+      return (params[key] - min) / (max - min);
+    });
+  }
+
+  // Denormalize [0,1] vector back to params
+  denormalize(vec) {
+    const p = {};
+    PARAM_KEYS.forEach((key, i) => {
+      const [min, max] = PARAM_RANGES[key];
+      p[key] = min + vec[i] * (max - min);
+    });
+    return clampParams(p);
+  }
+
+  // Sigmoid
+  sigmoid(x) { return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x)))); }
+
+  // Dot product
+  dot(a, b) { return a.reduce((s, v, i) => s + v * b[i], 0); }
+
+  // Record a pairwise comparison and update weights via SGD
+  addComparison(winnerParams, loserParams) {
+    const w = this.normalize(winnerParams);
+    const l = this.normalize(loserParams);
+    this.comparisons.push({ winner: w, loser: l });
+
+    // Run a few SGD passes over all data for better convergence
+    const passes = Math.min(5, 1 + Math.floor(this.comparisons.length / 3));
+    for (let pass = 0; pass < passes; pass++) {
+      for (const comp of this.comparisons) {
+        const diff = comp.winner.map((v, i) => v - comp.loser[i]);
+        const pred = this.sigmoid(this.dot(this.weights, diff));
+        const error = 1 - pred;  // we want P(winner > loser) = 1
+        // Gradient: error * diff
+        for (let i = 0; i < NUM_PARAMS; i++) {
+          this.weights[i] += this.learningRate * error * diff[i];
+        }
+      }
+    }
+
+    // L2 regularization to prevent weights from exploding
+    const reg = 0.01;
+    for (let i = 0; i < NUM_PARAMS; i++) {
+      this.weights[i] *= (1 - reg);
+    }
+  }
+
+  // Utility score for a parameter set
+  utility(params) {
+    return this.dot(this.weights, this.normalize(params));
+  }
+
+  // Generate a candidate by gradient ascent from a starting point
+  generateCandidate(baseParams, explorationNoise = 0.15) {
+    const base = this.normalize(baseParams);
+    const wNorm = Math.sqrt(this.dot(this.weights, this.weights)) || 1;
+    const stepSize = 0.3;
+
+    // Step in preference direction
+    const candidate = base.map((v, i) => {
+      const grad = this.weights[i] / wNorm;
+      const noise = (Math.random() - 0.5) * 2 * explorationNoise;
+      return Math.max(0, Math.min(1, v + grad * stepSize + noise));
+    });
+
+    return this.denormalize(candidate);
+  }
+
+  // Get top parameter influences (for display)
+  getTopInfluences(n = 5) {
+    const indexed = PARAM_KEYS.map((key, i) => ({ key, weight: this.weights[i] }));
+    indexed.sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight));
+    return indexed.slice(0, n);
+  }
+}
+
+// ============================================================
+// HYBRID OPTIMIZER: Elo display + Bradley-Terry generation
+// ============================================================
+class HybridOptimizer {
   constructor(popSize = 14) {
     this.popSize = popSize;
     this.population = [];
@@ -752,23 +848,31 @@ class EloOptimizer {
     this.generation = 1;
     this.eloHistory = [];
     this.nextId = 0;
-    this.snapshots = []; // { round, params, elo } for evolution timeline
+    this.snapshots = [];
+    this.prefModel = new PreferenceModel();
 
     for (let i = 0; i < popSize; i++) {
       this.population.push({ params: randomParams(), elo: 1500, matches: 0, id: this.nextId++ });
     }
-    // Initial snapshot
     this.snapshots.push({ round: 0, params: { ...this.getBest().params }, elo: 1500 });
   }
 
+  // Dynamic K-factor: high early, lower later
   get K() { return 64 - Math.min(24, this.comparisons * 0.6); }
 
+  // Smart matchmaking: pair similar-Elo candidates, prioritize under-tested
   getTwoCandidates() {
     const byMatches = [...this.population].sort((a, b) => a.matches - b.matches || Math.random() - 0.5);
     const c1 = byMatches[0];
     const c1Idx = this.population.indexOf(c1);
     const others = this.population.filter(c => c !== c1);
-    others.sort((a, b) => Math.abs(a.elo - c1.elo) - Math.abs(b.elo - c1.elo));
+
+    // After enough data, prefer informative pairs (high utility vs current best)
+    if (this.comparisons > 6) {
+      others.sort((a, b) => Math.abs(a.elo - c1.elo) - Math.abs(b.elo - c1.elo));
+    } else {
+      others.sort(() => Math.random() - 0.5);
+    }
     const pool = others.slice(0, Math.min(3, others.length));
     const c2 = pool[Math.floor(Math.random() * pool.length)];
     return [c1Idx, this.population.indexOf(c2)];
@@ -777,20 +881,27 @@ class EloOptimizer {
   recordPreference(winnerIdx, loserIdx) {
     const winner = this.population[winnerIdx];
     const loser = this.population[loserIdx];
+
+    // 1. Update Elo (for display)
     const expectedW = 1 / (1 + Math.pow(10, (loser.elo - winner.elo) / 400));
     const K = this.K;
     winner.elo = Math.round(winner.elo + K * (1 - expectedW));
     loser.elo = Math.round(loser.elo + K * (0 - (1 - expectedW)));
     winner.matches++; loser.matches++;
+
+    // 2. Update Bradley-Terry preference model (the real brain)
+    this.prefModel.addComparison(winner.params, loser.params);
+
     this.comparisons++;
     this.eloHistory.push(this.getBest().elo);
 
-    // Snapshot for timeline at key moments
+    // Snapshot for evolution timeline
     if (this.comparisons % 10 === 0 || this.comparisons === TOTAL_ROUNDS) {
       const best = this.getBest();
       this.snapshots.push({ round: this.comparisons, params: { ...best.params }, elo: best.elo });
     }
 
+    // Evolve every 5 comparisons
     if (this.comparisons % 5 === 0) this.evolveGeneration();
   }
 
@@ -799,19 +910,35 @@ class EloOptimizer {
     const sorted = [...this.population].sort((a, b) => b.elo - a.elo);
     const top = sorted.slice(0, 4);
     const bottom = sorted.slice(-4);
-    const mutStrength = 0.10 + 0.20 * Math.exp(-this.generation * 0.2);
+
+    // Exploration noise decreases over time
+    const noise = 0.12 + 0.18 * Math.exp(-this.generation * 0.2);
+
     for (const weak of bottom) {
       const idx = this.population.indexOf(weak);
-      const parentA = top[Math.floor(Math.random() * top.length)];
+      const parent = top[Math.floor(Math.random() * top.length)];
       let newParams;
-      if (Math.random() < 0.6 && top.length >= 2) {
-        const parentB = top[Math.floor(Math.random() * top.length)];
-        newParams = mutateParams(crossover(parentA.params, parentB.params), mutStrength);
+
+      if (this.comparisons >= 8) {
+        // Enough data: use learned preference model for directed generation
+        newParams = this.prefModel.generateCandidate(parent.params, noise);
       } else {
-        newParams = mutateParams(parentA.params, mutStrength);
+        // Early rounds: random mutation (not enough data for model)
+        if (Math.random() < 0.6 && top.length >= 2) {
+          const parentB = top[Math.floor(Math.random() * top.length)];
+          newParams = mutateParams(crossover(parent.params, parentB.params), noise);
+        } else {
+          newParams = mutateParams(parent.params, noise);
+        }
       }
+
       const parentAvgElo = top.reduce((s, c) => s + c.elo, 0) / top.length;
-      this.population[idx] = { params: newParams, elo: Math.round(parentAvgElo - 30), matches: 0, id: this.nextId++ };
+      this.population[idx] = {
+        params: newParams,
+        elo: Math.round(parentAvgElo - 30),
+        matches: 0,
+        id: this.nextId++,
+      };
     }
   }
 
@@ -913,7 +1040,7 @@ function buildEvolutionTimeline(snapshots) {
 // ============================================================
 // MAIN APP
 // ============================================================
-let optimizer = new EloOptimizer(14);
+let optimizer = new HybridOptimizer(14);
 let finished = false;
 
 const leftPanel = document.getElementById('left-panel');
@@ -996,6 +1123,26 @@ function showWinner() {
 
   // Evolution timeline
   buildEvolutionTimeline(optimizer.snapshots);
+
+  // Show learned preference insights
+  const influences = optimizer.prefModel.getTopInfluences(6);
+  const insightEl = document.getElementById('preference-insights');
+  let insightHtml = '';
+  for (const inf of influences) {
+    const dir = inf.weight > 0 ? '+' : '-';
+    const absW = Math.abs(inf.weight).toFixed(2);
+    const barPct = Math.min(100, Math.abs(inf.weight) / (Math.abs(influences[0].weight) || 1) * 100);
+    const color = inf.weight > 0 ? '#4aff6e' : '#ff6464';
+    const label = inf.weight > 0 ? 'more' : 'less';
+    insightHtml += `<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:0.75rem;">
+      <span style="width:110px;color:#aaa;text-align:right;">${inf.key}</span>
+      <div style="flex:1;height:10px;background:#1a1a2e;border-radius:5px;overflow:hidden;">
+        <div style="width:${barPct}%;height:100%;background:${color};border-radius:5px;"></div>
+      </div>
+      <span style="width:60px;color:${color};font-weight:700;">${dir}${absW} ${label}</span>
+    </div>`;
+  }
+  insightEl.innerHTML = insightHtml;
 }
 
 function handleChoice(winnerSide) {
@@ -1058,7 +1205,7 @@ window.toggleParams = function() {
 
 window.restartOptimizer = function() {
   finished = false;
-  optimizer = new EloOptimizer(14);
+  optimizer = new HybridOptimizer(14);
   document.getElementById('winner-overlay').classList.remove('visible');
   if (winnerShapeGroup && winnerScene) winnerScene.scene.remove(winnerShapeGroup);
   evoScenes.forEach(s => s.renderer.dispose());
